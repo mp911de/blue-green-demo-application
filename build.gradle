@@ -1,0 +1,124 @@
+buildscript {
+	ext {
+		springBootVersion = '1.3.5.RELEASE'
+	}
+	repositories {
+		mavenCentral()
+	}
+	dependencies {
+		classpath("org.springframework.boot:spring-boot-gradle-plugin:${springBootVersion}")
+		classpath('org.cloudfoundry:cf-gradle-plugin:1.1.3')
+	}
+}
+
+apply plugin: 'java'
+apply plugin: 'eclipse'
+apply plugin: 'spring-boot' 
+
+jar {
+	baseName = 'demo'
+	version = '0.0.1-SNAPSHOT'
+}
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+repositories {
+	mavenCentral()
+}
+
+
+dependencies {
+	compile('org.springframework.boot:spring-boot-starter')
+	compile('org.springframework.boot:spring-boot-starter-web')
+	testCompile('org.springframework.boot:spring-boot-starter-test')
+}
+
+
+eclipse {
+	classpath {
+		 containers.remove('org.eclipse.jdt.launching.JRE_CONTAINER')
+		 containers 'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-1.8'
+	}
+}
+
+// Collect all tasks to run "deploy" after "build"
+def checkTasks = []
+gradle.rootProject.allprojects { project ->
+	checkTasks.addAll(project.tasks.findAll { it.name == 'build' })
+}
+
+def final TARGET_SPACE = 'space'
+def final PRODUCTION_SPACE = 'variants'
+def final STAGING_SPACE = 'staging'
+
+def final DOMAIN_NAME = 'cfapps.io'
+def final APPLICATION_NAME = 'blue-green-demo-application'
+def final PRODUCTION_URI = "${APPLICATION_NAME}.${DOMAIN_NAME}"
+
+// Gather information about the build environment. Is it a Travis CI build?
+def travisBranch = System.getenv().get("TRAVIS_BRANCH")
+def isPullRequest = Boolean.valueOf(System.getenv().get("TRAVIS_PULL_REQUEST"))
+def isTravisBuild = travisBranch != null
+def isDeployableTravisBuild = isTravisBuild && !isPullRequest
+
+// User may specify an explicit target space any time, e.g. ./gradlew deploy -Pspace=production
+// Otherwise, target space will be determined by branch name (assuming we are in a Travis CI build).
+// If no branch is matched, no space is set, and deployment will be skipped entirely.
+
+if (!project.hasProperty(TARGET_SPACE) && travisBranch != null) {
+	if (travisBranch =~ '^master$') {
+		project.ext.setProperty(TARGET_SPACE, PRODUCTION_SPACE)
+	} else if (travisBranch =~ '^stage-.*') {
+		project.ext.setProperty(TARGET_SPACE, STAGING_SPACE)
+	}
+}
+
+task deploy(dependsOn: [build]) {
+	description = 'Deploys the project to a Cloud Foundry space (specified with -Pspace=<targetspace>)'
+	mustRunAfter checkTasks
+
+	// Always proceed with deployment if it is a local build. If we're on Travis CI, only
+	// deploy if the secure environment vars are available (i.e. this is not a pull request
+	// from a fork) and we're on a branch intended for production deployment.
+	if ((!isTravisBuild || isDeployableTravisBuild) && project.hasProperty(TARGET_SPACE)) {
+
+		dependsOn 'cfDeploy'
+
+		space = project.getProperty(TARGET_SPACE)
+		if(space == PRODUCTION_SPACE) {
+
+			// only needed when variants are set up.
+			dependsOn 'cfSwapDeployed'
+		}
+
+	} else {
+		onlyIf { false }
+	}
+}
+
+apply plugin: 'cloudfoundry'
+
+cloudfoundry {
+	target = "https://api.run.pivotal.io"
+	organization = "mp911de"
+	application = "$APPLICATION_NAME"
+	domain = "$DOMAIN_NAME"
+	host = "$APPLICATION_NAME"
+	memory = 512
+	healthCheckTimeout = 180
+	instances = 1
+}
+
+if (project.hasProperty(TARGET_SPACE)) {
+	cloudfoundry {
+		space = project.getProperty(TARGET_SPACE)
+		host = "$APPLICATION_NAME-${space}"
+		uris = (space == PRODUCTION_SPACE ? ["$PRODUCTION_URI"] : [ "$application-${space}.${DOMAIN_NAME}" ])
+	}
+
+	if (space == PRODUCTION_SPACE) {
+		cloudfoundry {
+			variants = ['-blue', '-green']
+		}
+	}
+}
